@@ -2,15 +2,26 @@ import cv2 as cv
 import numpy as np
 import joblib
 
-# ------------------- Load BJJ classifier -------------------
-clf = joblib.load("bjj_position_classifier.pkl")  # Trained model
+# Load BJJ position classifier
+clf = joblib.load("bjj_position_classifier.pkl")
 
-# ------------------- Pose config -------------------
+# Load OpenPose model
+net_pose = cv.dnn.readNetFromTensorflow("graph_opt.pb")
+
+# Load YOLO model for people detection
+yolo_net = cv.dnn.readNet("yolo/yolov3-tiny.weights", "yolo/yolov3-tiny.cfg")
+with open("yolo/coco.names", "r") as f:
+    class_names = f.read().strip().split("\n")
+
+person_class_id = class_names.index("person")
+yolo_net.setPreferableBackend(cv.dnn.DNN_BACKEND_OPENCV)
+yolo_net.setPreferableTarget(cv.dnn.DNN_TARGET_CPU)
+
 BODY_PARTS = {
     "Nose": 0, "Neck": 1, "RShoulder": 2, "RElbow": 3, "RWrist": 4,
     "LShoulder": 5, "LElbow": 6, "LWrist": 7, "RHip": 8, "RKnee": 9,
     "RAnkle": 10, "LHip": 11, "LKnee": 12, "LAnkle": 13, "REye": 14,
-    "LEye": 15, "REar": 16, "LEar": 17, "Background": 18
+    "LEye": 15, "REar": 16, "LEar": 17
 }
 
 POSE_PAIRS = [
@@ -21,23 +32,17 @@ POSE_PAIRS = [
     ["REye", "REar"], ["Nose", "LEye"], ["LEye", "LEar"]
 ]
 
-width, height = 368, 368
-thr = 0.2  # Confidence threshold
-net = cv.dnn.readNetFromTensorflow("graph_opt.pb")
-
-# ------------------- Feedback Logic -------------------
+pose_width, pose_height = 368, 368
+thr = 0.2
 
 def give_feedback(position):
-    feedback_dict = {
+    return {
         "standing": "Try a takedown or pull guard.",
         "mount": "Maintain pressure and posture!",
         "guard": "Watch out for guard passes.",
         "side control": "Look to escape or recover guard.",
         "back control": "Protect your neck!"
-    }
-    return feedback_dict.get(position, "")
-
-# ------------------- Helper Functions -------------------
+    }.get(position, "")
 
 def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
@@ -50,93 +55,113 @@ def calculate_angle(a, b, c):
     cosine_angle = np.dot(ba, bc) / (norm_ba * norm_bc)
     return np.degrees(np.arccos(np.clip(cosine_angle, -1.0, 1.0)))
 
-
-def analyze_pose(points, frame):
-    if points[0] and points[1] and points[8]:
-        back_angle = calculate_angle(points[8], points[1], points[0])
-        if back_angle < 120:
-            cv.putText(frame, "Straighten your back!", (30, 100), 
-                       cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-    if points[9] and points[8] and points[12]:
-        knee_angle = calculate_angle(points[8], points[9], points[12])
-        if knee_angle < 160:
-            cv.putText(frame, "Knees too bent!", (30, 140),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-    return frame
-
-def extract_features_from_keypoints(points):
-    features = []
-    # Only use keypoints 0 to 16 (excluding Background)
-    for pt in points[:17]:
-        if pt:
-            features.extend(pt[:2])
-        else:
-            features.extend([0, 0])
-    return np.array(features).reshape(1, -1)
-
-
-# ------------------- Main Pose Detector -------------------
-
-def poseDetector(frame):
-    frameWidth, frameHeight = frame.shape[1], frame.shape[0]
-    net.setInput(cv.dnn.blobFromImage(frame, 1.0, (width, height), (127.5, 127.5, 127.5), swapRB=True, crop=False))
-    out = net.forward()[:, :19, :, :]
-
+def extract_keypoints(frame):
+    h, w = frame.shape[:2]
+    net_pose.setInput(cv.dnn.blobFromImage(frame, 1.0, (pose_width, pose_height),
+                                           (127.5, 127.5, 127.5), swapRB=True, crop=False))
+    out = net_pose.forward()[:, :18, :, :]
     points = []
+
     for i in range(len(BODY_PARTS)):
         heatMap = out[0, i, :, :]
         _, conf, _, point = cv.minMaxLoc(heatMap)
-        x, y = (frameWidth * point[0]) / out.shape[3], (frameHeight * point[1]) / out.shape[2]
-        points.append((int(x), int(y)) if conf > thr else None)
+        x = int((w * point[0]) / out.shape[3])
+        y = int((h * point[1]) / out.shape[2])
+        points.append((x, y) if conf > thr else None)
 
+    return points
+
+def extract_features(points):
+    features = []
+    for pt in points[:17]:
+        features.extend(pt[:2] if pt else [0, 0])
+    return np.array(features).reshape(1, -1)
+
+def draw_pose(frame, points, offset=(0, 0), label=""):
+    ox, oy = offset
     for pair in POSE_PAIRS:
-        idFrom, idTo = BODY_PARTS[pair[0]], BODY_PARTS[pair[1]]
-        if points[idFrom] and points[idTo]:
-            cv.line(frame, points[idFrom], points[idTo], (0, 255, 0), 3)
-            cv.circle(frame, points[idFrom], 3, (0, 0, 255), cv.FILLED)
-            cv.circle(frame, points[idTo], 3, (0, 0, 255), cv.FILLED)
+        part_from = BODY_PARTS[pair[0]]
+        part_to = BODY_PARTS[pair[1]]
+        if points[part_from] and points[part_to]:
+            p1 = (points[part_from][0] + ox, points[part_from][1] + oy)
+            p2 = (points[part_to][0] + ox, points[part_to][1] + oy)
+            cv.line(frame, p1, p2, (0, 255, 0), 2)
+            cv.circle(frame, p1, 3, (0, 0, 255), -1)
+            cv.circle(frame, p2, 3, (0, 0, 255), -1)
 
-    frame = analyze_pose(points, frame)
+    if label:
+        cv.putText(frame, label, (ox + 10, oy + 20), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
-        # Count valid keypoints
-    valid_points = [pt for pt in points if pt is not None]
+def detect_people(frame):
+    blob = cv.dnn.blobFromImage(frame, 1 / 255.0, (416, 416), swapRB=True, crop=False)
+    yolo_net.setInput(blob)
+    layer_names = yolo_net.getUnconnectedOutLayersNames()
+    outputs = yolo_net.forward(layer_names)
 
-    if len(valid_points) >= 15:  # allow up to 3 missing keypoints
-        features = extract_features_from_keypoints(points)
+    h, w = frame.shape[:2]
+    boxes = []
+    confidences = []
 
+    for output in outputs:
+        for detection in output:
+            scores = detection[5:]
+            class_id = np.argmax(scores)
+            confidence = scores[class_id]
+            if class_id == person_class_id and confidence > 0.5:
+                center_x, center_y = int(detection[0] * w), int(detection[1] * h)
+                bw, bh = int(detection[2] * w), int(detection[3] * h)
+                x = int(center_x - bw / 2)
+                y = int(center_y - bh / 2)
+                boxes.append([x, y, bw, bh])
+                confidences.append(float(confidence))
 
-        try:
-            prediction = clf.predict(features)[0]
+    indices = cv.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
+    if len(indices) > 0:
+        if isinstance(indices[0], (list, tuple, np.ndarray)):
+            return [boxes[i[0]] for i in indices[:2]]
+        else:
+            return [boxes[i] for i in indices[:2]]
+    return []
 
-            # Display prediction
-            cv.putText(frame, f"Position: {prediction}", (30, 30),
-                       cv.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+# ---------------------- MAIN ----------------------
+cap = cv.VideoCapture("trimmed.mp4")  # or your actual file path
 
-            # Display feedback
-            feedback = give_feedback(prediction)
-            if feedback:
-                cv.putText(frame, f"Feedback: {feedback}", (30, 60),
-                           cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-        except Exception as e:
-            print("Prediction failed:", e)
-    else:
-        print("⚠️ Not enough keypoints detected for prediction")
-
-
-    return frame
-
-# ------------------- Run -------------------
-
-video_source = "/home/mary/Downloads/trimmed2.mp4"
-cap = cv.VideoCapture(video_source)
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
-    output = poseDetector(frame)
-    cv.imshow("Pose Detection", output)
-    if cv.waitKey(1) & 0xFF == ord('q'):
+
+    people = detect_people(frame)
+
+    for i, (x, y, w, h) in enumerate(people):
+        person_roi = frame[y:y+h, x:x+w]
+        if person_roi.size == 0:
+            continue
+
+        points = extract_keypoints(person_roi)
+        valid_points = [p for p in points[:17] if p is not None]
+
+        if len(valid_points) >= 15:
+            features = extract_features(points)
+            try:
+                prediction = clf.predict(features)[0]
+                feedback = give_feedback(prediction)
+                label = f"Person {i+1}: {prediction}"
+                draw_pose(frame, points, offset=(x, y), label=label)
+
+                if feedback:
+                    cv.putText(frame, feedback, (x + 10, y + h - 10),
+                               cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            except Exception as e:
+                print(f"[!] Prediction error for person {i+1}:", e)
+        else:
+            cv.putText(frame, f"Person {i+1}: Pose unclear", (x + 10, y + 20),
+                       cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+    cv.imshow("Multi-Person BJJ Coach", frame)
+    if cv.waitKey(10) & 0xFF == ord('q'):
+
         break
 
 cap.release()
