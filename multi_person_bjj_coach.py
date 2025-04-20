@@ -2,13 +2,13 @@ import cv2 as cv
 import numpy as np
 import joblib
 
-# Load BJJ position classifier
+# ------------------- Load BJJ classifier -------------------
 clf = joblib.load("bjj_position_classifier.pkl")
 
-# Load OpenPose model
+# ------------------- Load OpenPose -------------------
 net_pose = cv.dnn.readNetFromTensorflow("graph_opt.pb")
 
-# Load YOLO model for people detection
+# ------------------- Load YOLOv3-tiny -------------------
 yolo_net = cv.dnn.readNet("yolo/yolov3-tiny.weights", "yolo/yolov3-tiny.cfg")
 with open("yolo/coco.names", "r") as f:
     class_names = f.read().strip().split("\n")
@@ -17,6 +17,7 @@ person_class_id = class_names.index("person")
 yolo_net.setPreferableBackend(cv.dnn.DNN_BACKEND_OPENCV)
 yolo_net.setPreferableTarget(cv.dnn.DNN_TARGET_CPU)
 
+# ------------------- Pose Configuration -------------------
 BODY_PARTS = {
     "Nose": 0, "Neck": 1, "RShoulder": 2, "RElbow": 3, "RWrist": 4,
     "LShoulder": 5, "LElbow": 6, "LWrist": 7, "RHip": 8, "RKnee": 9,
@@ -33,7 +34,7 @@ POSE_PAIRS = [
 ]
 
 pose_width, pose_height = 368, 368
-thr = 0.2
+thr = 0.2  # OpenPose confidence threshold
 
 def give_feedback(position):
     return {
@@ -108,18 +109,20 @@ def detect_people(frame):
                 bw, bh = int(detection[2] * w), int(detection[3] * h)
                 x = int(center_x - bw / 2)
                 y = int(center_y - bh / 2)
+
+                cv.rectangle(frame, (x, y), (x + bw, y + bh), (255, 0, 0), 2)
+                cv.putText(frame, f"Conf: {confidence:.2f}", (x, y - 10),
+                           cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
                 boxes.append([x, y, bw, bh])
                 confidences.append(float(confidence))
 
     indices = cv.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
     if len(indices) > 0:
-        if isinstance(indices[0], (list, tuple, np.ndarray)):
-            return [boxes[i[0]] for i in indices[:2]]
-        else:
-            return [boxes[i] for i in indices[:2]]
+        return [boxes[i[0] if isinstance(i, (list, tuple, np.ndarray)) else i] for i in indices[:2]]
     return []
 
-# ------------------ MAIN ------------------
+# ------------------- Main Loop -------------------
 cap = cv.VideoCapture(0)
 
 while cap.isOpened():
@@ -137,12 +140,15 @@ while cap.isOpened():
         padded, offset, scale = resize_and_pad(roi)
         points = extract_keypoints(padded)
 
-        # Scale back to original ROI
         points = [(int((pt[0] - offset[0]) / scale), int((pt[1] - offset[1]) / scale)) if pt else None for pt in points]
-
         valid_points = [p for p in points[:17] if p is not None]
 
+        print(f"[DEBUG] Person {i+1} - Detected {len(valid_points)} keypoints")
+
+        draw_pose(frame, points, offset=(x, y))
+
         if len(valid_points) >= 15:
+            print(f"[DEBUG] Predicting for Person {i+1} with {len(valid_points)} valid keypoints")
             features = extract_features(points)
             try:
                 prediction = clf.predict(features)[0]
@@ -153,9 +159,9 @@ while cap.isOpened():
                     cv.putText(frame, feedback, (x + 10, y + h - 10),
                                cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             except Exception as e:
-                print(f"[!] Prediction error for person {i+1}:", e)
+                print(f"[!] Prediction error for person {i+1}: {e}")
         else:
-            cv.putText(frame, f"Person {i+1}: Pose not clear", (x + 10, y + 20),
+            cv.putText(frame, f"Person {i+1}: Pose unclear", (x + 10, y + 20),
                        cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     cv.imshow("Multi-Person BJJ Coach", frame)
@@ -164,4 +170,3 @@ while cap.isOpened():
 
 cap.release()
 cv.destroyAllWindows()
-
