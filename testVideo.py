@@ -1,22 +1,24 @@
+
 import cv2 as cv
 import numpy as np
 import joblib
 
-# Load BJJ position classifier
+# ------------------- Load BJJ classifier -------------------
 clf = joblib.load("bjj_position_classifier.pkl")
 
-# Load OpenPose model
+# ------------------- Load OpenPose -------------------
 net_pose = cv.dnn.readNetFromTensorflow("graph_opt.pb")
 
-# Load YOLO model for people detection
+# ------------------- Load YOLOv3-tiny -------------------
 yolo_net = cv.dnn.readNet("yolo/yolov3-tiny.weights", "yolo/yolov3-tiny.cfg")
 with open("yolo/coco.names", "r") as f:
     class_names = f.read().strip().split("\n")
-
 person_class_id = class_names.index("person")
+
 yolo_net.setPreferableBackend(cv.dnn.DNN_BACKEND_OPENCV)
 yolo_net.setPreferableTarget(cv.dnn.DNN_TARGET_CPU)
 
+# ------------------- Pose Configuration -------------------
 BODY_PARTS = {
     "Nose": 0, "Neck": 1, "RShoulder": 2, "RElbow": 3, "RWrist": 4,
     "LShoulder": 5, "LElbow": 6, "LWrist": 7, "RHip": 8, "RKnee": 9,
@@ -44,16 +46,17 @@ def give_feedback(position):
         "back control": "Protect your neck!"
     }.get(position, "")
 
-def calculate_angle(a, b, c):
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    ba = a - b
-    bc = c - b
-    norm_ba = np.linalg.norm(ba)
-    norm_bc = np.linalg.norm(bc)
-    if norm_ba == 0 or norm_bc == 0:
-        return 0.0
-    cosine_angle = np.dot(ba, bc) / (norm_ba * norm_bc)
-    return np.degrees(np.arccos(np.clip(cosine_angle, -1.0, 1.0)))
+def resize_and_pad(image, size=(368, 368)):
+    h, w = image.shape[:2]
+    scale = min(size[0] / h, size[1] / w)
+    resized = cv.resize(image, (int(w * scale), int(h * scale)))
+    pad_top = (size[0] - resized.shape[0]) // 2
+    pad_bottom = size[0] - resized.shape[0] - pad_top
+    pad_left = (size[1] - resized.shape[1]) // 2
+    pad_right = size[1] - resized.shape[1] - pad_left
+    padded = cv.copyMakeBorder(resized, pad_top, pad_bottom, pad_left, pad_right,
+                               borderType=cv.BORDER_CONSTANT, value=[0, 0, 0])
+    return padded, (pad_left, pad_top), scale
 
 def extract_keypoints(frame):
     h, w = frame.shape[:2]
@@ -61,14 +64,12 @@ def extract_keypoints(frame):
                                            (127.5, 127.5, 127.5), swapRB=True, crop=False))
     out = net_pose.forward()[:, :18, :, :]
     points = []
-
     for i in range(len(BODY_PARTS)):
         heatMap = out[0, i, :, :]
         _, conf, _, point = cv.minMaxLoc(heatMap)
         x = int((w * point[0]) / out.shape[3])
         y = int((h * point[1]) / out.shape[2])
         points.append((x, y) if conf > thr else None)
-
     return points
 
 def extract_features(points):
@@ -80,24 +81,21 @@ def extract_features(points):
 def draw_pose(frame, points, offset=(0, 0), label=""):
     ox, oy = offset
     for pair in POSE_PAIRS:
-        part_from = BODY_PARTS[pair[0]]
-        part_to = BODY_PARTS[pair[1]]
-        if points[part_from] and points[part_to]:
-            p1 = (points[part_from][0] + ox, points[part_from][1] + oy)
-            p2 = (points[part_to][0] + ox, points[part_to][1] + oy)
+        idFrom = BODY_PARTS[pair[0]]
+        idTo = BODY_PARTS[pair[1]]
+        if points[idFrom] and points[idTo]:
+            p1 = (points[idFrom][0] + ox, points[idFrom][1] + oy)
+            p2 = (points[idTo][0] + ox, points[idTo][1] + oy)
             cv.line(frame, p1, p2, (0, 255, 0), 2)
             cv.circle(frame, p1, 3, (0, 0, 255), -1)
             cv.circle(frame, p2, 3, (0, 0, 255), -1)
-
     if label:
         cv.putText(frame, label, (ox + 10, oy + 20), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
 
 def detect_people(frame):
     blob = cv.dnn.blobFromImage(frame, 1 / 255.0, (416, 416), swapRB=True, crop=False)
     yolo_net.setInput(blob)
-    layer_names = yolo_net.getUnconnectedOutLayersNames()
-    outputs = yolo_net.forward(layer_names)
-
+    outputs = yolo_net.forward(yolo_net.getUnconnectedOutLayersNames())
     h, w = frame.shape[:2]
     boxes = []
     confidences = []
@@ -112,20 +110,19 @@ def detect_people(frame):
                 bw, bh = int(detection[2] * w), int(detection[3] * h)
                 x = int(center_x - bw / 2)
                 y = int(center_y - bh / 2)
+                cv.rectangle(frame, (x, y), (x + bw, y + bh), (255, 0, 0), 2)
+                cv.putText(frame, f"Conf: {confidence:.2f}", (x, y - 10),
+                           cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
                 boxes.append([x, y, bw, bh])
                 confidences.append(float(confidence))
 
     indices = cv.dnn.NMSBoxes(boxes, confidences, 0.5, 0.4)
     if len(indices) > 0:
-        if isinstance(indices[0], (list, tuple, np.ndarray)):
-            return [boxes[i[0]] for i in indices[:2]]
-        else:
-            return [boxes[i] for i in indices[:2]]
+        return [boxes[i[0] if isinstance(i, (list, tuple, np.ndarray)) else i] for i in indices[:2]]
     return []
 
-# ---------------------- MAIN ----------------------
-cap = cv.VideoCapture("trimmed.mp4")  # or your actual file path
-
+# ------------------- Main -------------------
+cap = cv.VideoCapture("trimmed.mp4")
 
 while cap.isOpened():
     ret, frame = cap.read()
@@ -135,35 +132,38 @@ while cap.isOpened():
     people = detect_people(frame)
 
     for i, (x, y, w, h) in enumerate(people):
-        person_roi = frame[y:y+h, x:x+w]
-        if person_roi.size == 0:
+        roi = frame[y:y+h, x:x+w]
+        if roi.size == 0:
             continue
 
-        points = extract_keypoints(person_roi)
+        padded, offset, scale = resize_and_pad(roi)
+        points = extract_keypoints(padded)
+        points = [(int((pt[0] - offset[0]) / scale), int((pt[1] - offset[1]) / scale)) if pt else None for pt in points]
         valid_points = [p for p in points[:17] if p is not None]
 
+        print(f"[DEBUG] Person {i+1} - Detected {len(valid_points)} keypoints")
+        draw_pose(frame, points, offset=(x, y))
+
         if len(valid_points) >= 15:
+            print(f"[DEBUG] Predicting for Person {i+1} with {len(valid_points)} valid keypoints")
             features = extract_features(points)
             try:
                 prediction = clf.predict(features)[0]
                 feedback = give_feedback(prediction)
                 label = f"Person {i+1}: {prediction}"
                 draw_pose(frame, points, offset=(x, y), label=label)
-
                 if feedback:
                     cv.putText(frame, feedback, (x + 10, y + h - 10),
                                cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             except Exception as e:
-                print(f"[!] Prediction error for person {i+1}:", e)
+                print(f"[!] Prediction error for person {i+1}: {e}")
         else:
             cv.putText(frame, f"Person {i+1}: Pose unclear", (x + 10, y + 20),
                        cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     cv.imshow("Multi-Person BJJ Coach", frame)
-    if cv.waitKey(10) & 0xFF == ord('q'):
-
+    if cv.waitKey(1) & 0xFF == ord('q'):
         break
 
 cap.release()
 cv.destroyAllWindows()
-

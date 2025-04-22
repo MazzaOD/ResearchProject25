@@ -58,10 +58,20 @@ def resize_and_pad(image, size=(368, 368)):
     return padded, (pad_left, pad_top), scale
 
 def extract_keypoints(frame):
-    h, w = frame.shape[:2]
-    net_pose.setInput(cv.dnn.blobFromImage(frame, 1.0, (pose_width, pose_height),
+    # Convert to grayscale
+    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    
+    # Apply Gaussian blur to reduce noise
+    blurred = cv.GaussianBlur(gray, (5, 5), 0)
+
+    # Convert back to BGR (since OpenPose expects 3-channel input)
+    processed = cv.cvtColor(blurred, cv.COLOR_GRAY2BGR)
+
+    h, w = processed.shape[:2]
+    net_pose.setInput(cv.dnn.blobFromImage(processed, 1.0, (pose_width, pose_height),
                                            (127.5, 127.5, 127.5), swapRB=True, crop=False))
     out = net_pose.forward()[:, :18, :, :]
+
     points = []
     for i in range(len(BODY_PARTS)):
         heatMap = out[0, i, :, :]
@@ -69,7 +79,9 @@ def extract_keypoints(frame):
         x = int((w * point[0]) / out.shape[3])
         y = int((h * point[1]) / out.shape[2])
         points.append((x, y) if conf > thr else None)
+
     return points
+
 
 def extract_features(points):
     features = []
