@@ -3,7 +3,7 @@ import numpy as np
 import joblib
 
 # ------------------- Load BJJ classifier -------------------
-clf = joblib.load("bjj_position_classifier.pkl")
+clf = joblib.load("bjj_position_classifier2.pkl")
 
 # ------------------- Load OpenPose -------------------
 net_pose = cv.dnn.readNetFromTensorflow("graph_opt.pb")
@@ -43,7 +43,8 @@ def give_feedback(position):
         "guard": "Watch out for guard passes.",
         "side control": "Look to escape or recover guard.",
         "back control": "Protect your neck!"
-    }.get(position, "")
+    }.get(position, "No feedback available.")
+
 
 def resize_and_pad(image, size=(368, 368)):
     h, w = image.shape[:2]
@@ -101,7 +102,9 @@ def draw_pose(frame, points, offset=(0, 0), label=""):
             cv.circle(frame, p1, 3, (0, 0, 255), -1)
             cv.circle(frame, p2, 3, (0, 0, 255), -1)
     if label:
-        cv.putText(frame, label, (ox + 10, oy + 20), cv.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv.putText(frame, f"{len(valid_points)} keypoints detected", (x + 10, y + h + 20),
+           cv.FONT_HERSHEY_SIMPLEX, 0.5, (200, 255, 255), 1)
+
 
 def detect_people(frame):
     blob = cv.dnn.blobFromImage(frame, 1 / 255.0, (416, 416), swapRB=True, crop=False)
@@ -159,7 +162,7 @@ while cap.isOpened():
 
         draw_pose(frame, points, offset=(x, y))
 
-        if len(valid_points) >= 15:
+        if len(valid_points) >= 12:
             print(f"[DEBUG] Predicting for Person {i+1} with {len(valid_points)} valid keypoints")
             features = extract_features(points)
             try:
@@ -168,8 +171,8 @@ while cap.isOpened():
                 label = f"Person {i+1}: {prediction}"
                 draw_pose(frame, points, offset=(x, y), label=label)
                 if feedback:
-                    cv.putText(frame, feedback, (x + 10, y + h - 10),
-                               cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    cv.putText(frame, f"Feedback: {feedback}", (x + 10, y + h + 40),
+                                cv.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 180), 2)
             except Exception as e:
                 print(f"[!] Prediction error for person {i+1}: {e}")
         else:
@@ -177,7 +180,7 @@ while cap.isOpened():
                        cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     cv.imshow("Multi-Person BJJ Coach", frame)
-    if cv.waitKey(1) & 0xFF == ord('q'):
+    if cv.waitKey(50) & 0xFF == ord('q'):
         break
 
 cap.release()
